@@ -5,7 +5,10 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   projectRecoveredStageRunQuery,
 } from '../family-runtime-stage-run-query-projection.ts';
-import { recoverStageRunCloseoutProjection } from '../family-runtime-stage-run-closeout-recovery.ts';
+import {
+  recoverStageRunCloseoutProjection,
+  retryStageRunProducer,
+} from '../family-runtime-stage-run-closeout-recovery.ts';
 import {
   appendDistinctStageRunObservation,
   summarizeStageRunObservation,
@@ -52,6 +55,27 @@ export function parseStageRunArgs(rest: string[]): FamilyRuntimeCommandInput | n
       else timeoutMs = value;
     }
     return { mode: 'stage_run_watch', workflowId: identityOrFlag, intervalMs, timeoutMs };
+  }
+  if (action === 'retry-producer') {
+    if (
+      !identityOrFlag
+      || flags[0] !== '--attempt'
+      || !flags[1]
+      || flags.length !== 2
+    ) {
+      throw new FrameworkContractError(
+        'cli_usage_error',
+        'family-runtime stage-run retry-producer requires a StageRun id and an Attempt id.',
+        {
+          usage: 'opl family-runtime stage-run retry-producer <stage_run_id> --attempt <attempt_id>',
+        },
+      );
+    }
+    return {
+      mode: 'stage_run_retry_producer',
+      stageRunId: identityOrFlag,
+      stageAttemptId: flags[1],
+    };
   }
   if (action === 'recover-closeout') {
     if (
@@ -213,6 +237,27 @@ export async function runFamilyRuntimeStageRunCommand(context: {
       payload: recovery,
     });
     return { version: 'g2', family_runtime_stage_run_closeout_recovery: recovery };
+  }
+  if (parsed.mode === 'stage_run_retry_producer') {
+    const retry = await retryStageRunProducer(db, {
+      stageRunId: parsed.stageRunId,
+      stageAttemptId: parsed.stageAttemptId,
+    }, {
+      paths,
+      startWorkflow: async (workflowInput) =>
+        stageRunRuntime?.startRecoveryWorkflow
+          ? await stageRunRuntime.startRecoveryWorkflow(workflowInput, { paths })
+          : await (await temporalProviderModule()).startTemporalStageRunRecoveryWorkflow(
+              workflowInput,
+              { paths },
+            ),
+    });
+    insertEvent(db, {
+      eventType: 'stage_run_producer_retry_requested',
+      source: 'opl-cli',
+      payload: retry,
+    });
+    return { version: 'g2', family_runtime_stage_run_producer_retry: retry };
   }
   throw new Error(`Unhandled family runtime stage-run mode: ${(parsed as { mode: string }).mode}`);
 }

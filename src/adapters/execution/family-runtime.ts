@@ -151,6 +151,7 @@ export async function runFamilyRuntime(
       parsed.mode === 'stage_run_query'
       || parsed.mode === 'stage_run_watch'
       || parsed.mode === 'stage_run_recover_closeout'
+      || parsed.mode === 'stage_run_retry_producer'
     ) {
       return await runFamilyRuntimeStageRunCommand({
         db,

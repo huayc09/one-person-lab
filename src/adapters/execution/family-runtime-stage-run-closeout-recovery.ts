@@ -17,7 +17,10 @@ import { materializeOplRevisionTransport } from './family-runtime-revision-intak
 import {
   ingestStageAttemptCloseout,
   inspectStageAttempt,
+  syncStageAttemptFromTemporalTerminalObservation,
 } from './family-runtime-stage-attempts.ts';
+import { queryTemporalStageAttemptReadModel } from './family-runtime-temporal-query.ts';
+import { familyRuntimePaths } from './family-runtime-store.ts';
 import {
   inspectStageQualityCycle,
   projectTemporalStageRunQualityCycle,
@@ -25,6 +28,10 @@ import {
 import type {
   TemporalStageRunWorkflowInput,
 } from './family-runtime-temporal.ts';
+import type {
+  TemporalStageRunAttemptSummary,
+  TemporalStageRunRecoveryResume,
+} from './family-runtime-temporal-stage-run.ts';
 import {
   artifactIdentity,
   canonicalCloseoutMetadata,
@@ -696,6 +703,184 @@ export async function recoverStageRunCloseoutProjection(db: DatabaseSync, input:
       durable_controller_running: String(temporalStart.workflow_status).toUpperCase().endsWith('RUNNING'),
       formal_review_dispatched: true,
       producer_attempt_count: producerAttemptCount,
+    };
+  } catch (error) {
+    recordStageRunRecoveryStartFailure(db, {
+      stageRunId: input.stageRunId,
+      recoveryId,
+      claimToken: claim.claim_token,
+      error,
+      now: options.now?.(),
+    });
+    throw error;
+  }
+}
+
+export async function retryStageRunProducer(
+  db: DatabaseSync,
+  input: { stageRunId: string; stageAttemptId: string },
+  options: {
+    paths: ReturnType<typeof familyRuntimePaths>;
+    startWorkflow: (input: TemporalStageRunWorkflowInput) => Promise<Record<string, unknown>>;
+    now?: () => Date;
+    startLeaseMs?: number;
+  },
+) {
+  const attempt = inspectStageAttempt(db, input.stageAttemptId);
+  if (attempt.stage_run_id !== input.stageRunId) {
+    throw new FrameworkContractError('contract_shape_invalid', 'Producer retry Attempt does not belong to the requested StageRun.', {
+      failure_code: 'stage_run_producer_retry_attempt_lineage_mismatch',
+      stage_run_id: input.stageRunId,
+      stage_attempt_id: input.stageAttemptId,
+      attempt_stage_run_id: attempt.stage_run_id,
+    });
+  }
+  if (attempt.attempt_role !== 'producer') {
+    throw new FrameworkContractError('contract_shape_invalid', 'Only a producer Attempt can be retried by this command.', {
+      failure_code: 'stage_run_producer_retry_role_invalid',
+      stage_attempt_id: input.stageAttemptId,
+      attempt_role: attempt.attempt_role,
+    });
+  }
+  const launch = findStageRunLaunch(db, input.stageRunId);
+  if (!launch) {
+    throw new FrameworkContractError('contract_shape_invalid', 'Requested StageRun is not registered in the launch authority.', {
+      failure_code: 'stage_quality_cycle_stage_run_unregistered',
+      stage_run_id: input.stageRunId,
+    });
+  }
+  if (
+    launch.domain_id !== attempt.domain_id
+    || launch.stage_id !== attempt.stage_id
+    || launch.execution_scope?.scope_digest !== attempt.execution_scope?.scope_digest
+  ) {
+    throw new FrameworkContractError('contract_shape_invalid', 'Producer retry Attempt does not match the registered StageRun identity.', {
+      failure_code: 'stage_run_producer_retry_stage_run_lineage_invalid',
+      stage_run_id: input.stageRunId,
+      stage_attempt_id: input.stageAttemptId,
+    });
+  }
+  const temporalQuery = await queryTemporalStageAttemptReadModel(attempt, { paths: options.paths });
+  let closeoutSyncError: string | null = null;
+  try {
+    syncStageAttemptFromTemporalTerminalObservation(db, temporalQuery);
+  } catch (error) {
+    closeoutSyncError = error instanceof Error ? error.message : String(error);
+  }
+  const queryReceipt = record(temporalQuery);
+  const queryObservation = record(queryReceipt.query);
+  const workflowStatus = String(queryReceipt.workflow_status ?? '').toUpperCase();
+  const queryStatus = String(queryObservation.status ?? '');
+  const terminalWorkflow = [
+    'COMPLETED',
+    'FAILED',
+    'CANCELED',
+    'CANCELLED',
+    'TERMINATED',
+    'TIMED_OUT',
+  ].includes(workflowStatus);
+  const terminalQuery = ['completed', 'failed', 'blocked', 'human_gate'].includes(queryStatus);
+  if (!terminalWorkflow && !terminalQuery) {
+    throw new FrameworkContractError('contract_shape_invalid', 'Producer retry requires a terminal provider Attempt.', {
+      failure_code: 'stage_run_producer_retry_attempt_not_terminal',
+      stage_run_id: input.stageRunId,
+      stage_attempt_id: input.stageAttemptId,
+      workflow_status: workflowStatus || null,
+      query_status: queryStatus || null,
+    });
+  }
+  const summary: TemporalStageRunAttemptSummary = {
+    attempt_role: 'producer',
+    quality_round_index: attempt.quality_round_index ?? 0,
+    stage_attempt_id: attempt.stage_attempt_id,
+    workflow_id: attempt.workflow_id,
+    execution_session_ref: attempt.execution_session_ref ?? null,
+    artifact_producer_attempt_ref: null,
+    status: queryStatus === 'completed' ? 'completed' : queryStatus === 'blocked' ? 'blocked' : 'failed',
+    artifact_refs: [],
+    artifact_hashes: [],
+    artifact_identity_receipt_refs: [],
+  };
+  const recoveryId = stableId('stage-run-producer-retry', [input.stageRunId, input.stageAttemptId]);
+  const recoveryResume: TemporalStageRunRecoveryResume = {
+    surface_kind: 'opl_stage_run_recovery_resume',
+    version: 'opl-stage-run-recovery-resume.v1',
+    recovery_id: recoveryId,
+    quality_cycle_id: `quality-cycle:${input.stageRunId}`,
+    retry_producer: true,
+    resume_after_role: 'producer',
+    artifact_producer_attempt_ref: `opl://stage_attempts/${attempt.stage_attempt_id}`,
+    artifact_producer_attempt_summary: summary,
+    producer_attempt_ref: `opl://stage_attempts/${attempt.stage_attempt_id}`,
+    producer_attempt_summary: summary,
+    prior_attempt_summaries: [summary],
+    artifact_refs: [],
+    artifact_hashes: [],
+    artifact_identity_receipt_refs: [],
+    findings: [],
+    repair_map: [],
+    review_receipts: [],
+    repair_rounds_used: 0,
+    quality_debt_refs: [],
+    route_quality_debt_refs: [],
+    route_recommendations: [],
+  };
+  const workflowInput: TemporalStageRunWorkflowInput = {
+    ...(launch.stage_run_input as TemporalStageRunWorkflowInput),
+    recovery_resume: recoveryResume,
+  };
+  const producerAttemptCount = Number((db.prepare(`
+    SELECT COUNT(*) AS count FROM stage_attempts
+    WHERE stage_run_id = ? AND attempt_role = 'producer'
+  `).get(input.stageRunId) as { count: number }).count);
+  const claim = claimStageRunRecoveryStart(db, {
+    workflowInput,
+    now: options.now?.(),
+    leaseMs: options.startLeaseMs,
+  });
+  const baseReceipt = {
+    surface_kind: 'opl_stage_run_producer_retry',
+    version: 'opl-stage-run-producer-retry.v1',
+    recovery_id: recoveryId,
+    stage_run_id: input.stageRunId,
+    stage_attempt_id: input.stageAttemptId,
+    retry_producer: true,
+    new_stage_run_created: false,
+    producer_attempt_count_before: producerAttemptCount,
+    closeout_sync_error: closeoutSyncError,
+    authority_boundary: {
+      opl: 'same_stage_run_producer_attempt_retry_only',
+      domain: 'truth_quality_artifact_gate_owner',
+    },
+  };
+  if (!claim.claimed || !claim.claim_token) {
+    const temporalStart = claim.recovery_run.temporal_start_receipt;
+    return {
+      ...baseReceipt,
+      recovery_status: claim.claim_status === 'started'
+        ? 'producer_retry_already_started'
+        : 'producer_retry_starting',
+      idempotent_replay: true,
+      recovery_run: claim.recovery_run,
+      temporal_start: temporalStart,
+    };
+  }
+  try {
+    const temporalStart = await options.startWorkflow(workflowInput);
+    const recorded = recordStageRunTemporalRecoveryStart(db, {
+      stageRunId: input.stageRunId,
+      recoveryId,
+      temporalStartReceipt: temporalStart,
+      claimToken: claim.claim_token,
+      now: options.now?.(),
+    });
+    return {
+      ...baseReceipt,
+      recovery_status: 'producer_retry_started',
+      idempotent_replay: false,
+      recovery_run: recorded.recovery_run,
+      temporal_start: temporalStart,
+      durable_controller_running: String(temporalStart.workflow_status).toUpperCase().endsWith('RUNNING'),
     };
   } catch (error) {
     recordStageRunRecoveryStartFailure(db, {

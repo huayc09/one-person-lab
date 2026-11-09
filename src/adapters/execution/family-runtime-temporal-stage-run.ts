@@ -80,6 +80,7 @@ export type TemporalStageRunRecoveryResume = {
   version: 'opl-stage-run-recovery-resume.v1';
   recovery_id: string;
   quality_cycle_id: string;
+  retry_producer?: boolean;
   resume_after_role?: 'producer' | 'repairer' | 'reviewer';
   reviewer_attempt_ref?: string;
   artifact_producer_attempt_ref?: string;

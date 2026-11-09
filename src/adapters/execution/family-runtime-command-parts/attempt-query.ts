@@ -19,9 +19,36 @@ export async function runAttemptListCommand(
   context: AttemptListCommandContext,
 ): Promise<Record<string, unknown>> {
   const { db, paths, parsed, managedProviderProjection } = context;
-  const projection = await listStageAttemptsWithMonitoringProjection(db, paths, {
-    managedProviderProjection: managedProviderProjection(),
+  const providerProjection = managedProviderProjection();
+  let projection = await listStageAttemptsWithMonitoringProjection(db, paths, {
+    managedProviderProjection: providerProjection,
   }, parsed.filters);
+  const projectionRefreshErrors: Array<{ stage_attempt_id: string; error: string }> = [];
+  let refreshedAny = false;
+  for (const listed of projection.attempts) {
+    const stageAttemptId = typeof (listed as { stage_attempt_id?: unknown }).stage_attempt_id === 'string'
+      ? (listed as { stage_attempt_id: string }).stage_attempt_id
+      : null;
+    if (!stageAttemptId) continue;
+    const current = inspectStageAttempt(db, stageAttemptId);
+    if (!['queued', 'running', 'checkpointed'].includes(current.status)) continue;
+    if (!stageAttemptAllowsRuntimeRefresh(db, stageAttemptId, 'family_runtime_attempt_list_refresh')) continue;
+    try {
+      const temporalQuery = await queryTemporalStageAttemptReadModel(current, { paths });
+      syncStageAttemptFromTemporalTerminalObservation(db, temporalQuery);
+      refreshedAny = true;
+    } catch (error) {
+      projectionRefreshErrors.push({
+        stage_attempt_id: stageAttemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (refreshedAny) {
+    projection = await listStageAttemptsWithMonitoringProjection(db, paths, {
+      managedProviderProjection: providerProjection,
+    }, parsed.filters);
+  }
   return {
     version: 'g2',
     family_runtime_stage_attempts: {
@@ -33,6 +60,7 @@ export async function runAttemptListCommand(
       items: projection.compact_timeline ?? projection.attempts,
       attempts: projection.compact_timeline ?? projection.attempts,
       ...(projection.compact_timeline ? { compact_timeline: projection.compact_timeline } : {}),
+      ...(projectionRefreshErrors.length > 0 ? { projection_refresh_errors: projectionRefreshErrors } : {}),
     },
   };
 }

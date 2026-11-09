@@ -58,6 +58,27 @@ export function requireTemporalStageRunRecoveryResume(
   }
   const expectedQualityCycleId = `quality-cycle:${input.stage_run_id}`;
   const resumeAfterRole = recovery.resume_after_role ?? 'producer';
+  if (recovery.retry_producer === true) {
+    if (
+      resumeAfterRole !== 'producer'
+      || recovery.quality_cycle_id !== expectedQualityCycleId
+      || !Array.isArray(recovery.prior_attempt_summaries)
+      || recovery.prior_attempt_summaries.length === 0
+      || recovery.prior_attempt_summaries.at(-1)?.attempt_role !== 'producer'
+    ) {
+      throw new FrameworkContractError(
+        'contract_shape_invalid',
+        'StageRun producer retry recovery identity is invalid.',
+        {
+          failure_code: 'stage_run_recovery_producer_retry_identity_invalid',
+          stage_run_id: input.stage_run_id,
+          recovery_id: recovery.recovery_id,
+          resume_after_role: resumeAfterRole,
+        },
+      );
+    }
+    return recovery;
+  }
   const artifactProducer = recovery.artifact_producer_attempt_summary
     ?? recovery.producer_attempt_summary;
   const artifactProducerAttemptRef = recovery.artifact_producer_attempt_ref

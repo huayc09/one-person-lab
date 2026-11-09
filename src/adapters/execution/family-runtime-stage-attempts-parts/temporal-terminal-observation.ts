@@ -273,6 +273,7 @@ function progressDiagnosticPacketFromTemporalBlocker(input: {
   return {
     surface_kind: 'stage_attempt_closeout_packet',
     ...terminalObservationCloseoutIdentity(input.observation),
+    ...(input.row.stage_run_id ? { stage_run_id: input.row.stage_run_id } : {}),
     closeout_refs: [...new Set([...(projected?.closeout_refs ?? []), diagnosticRef])],
     consumed_refs: projected?.consumed_refs ?? [],
     consumed_memory_refs: projected?.consumed_memory_refs ?? [],
@@ -608,6 +609,8 @@ export function syncStageAttemptFromTemporalTerminalObservation(
       stageAttemptId: observation.stage_attempt_id,
       packet: {
         surface_kind: 'stage_attempt_closeout_packet',
+        ...terminalObservationCloseoutIdentity(observation),
+        ...(row.stage_run_id ? { stage_run_id: row.stage_run_id } : {}),
         closeout_refs: [diagnosticRef],
         consumed_refs: [],
         consumed_memory_refs: [],

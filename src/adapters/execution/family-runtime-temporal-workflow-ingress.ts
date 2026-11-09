@@ -318,6 +318,23 @@ export function validateWorkflowStageRunInput(input: TemporalStageRunWorkflowInp
   const recovery = input.recovery_resume;
   if (recovery) {
     const resumeAfterRole = recovery.resume_after_role ?? 'producer';
+    if (recovery.retry_producer === true) {
+      const priorAttempts = recovery.prior_attempt_summaries;
+      if (
+        recovery.surface_kind !== 'opl_stage_run_recovery_resume'
+        || recovery.version !== 'opl-stage-run-recovery-resume.v1'
+        || !recovery.recovery_id?.trim()
+        || recovery.quality_cycle_id !== stageRunQualityCycleId(input)
+        || !input.quality_policy.formal_review.required
+        || resumeAfterRole !== 'producer'
+        || !Array.isArray(priorAttempts)
+        || priorAttempts.length === 0
+        || priorAttempts.at(-1)?.attempt_role !== 'producer'
+      ) {
+        throw new Error('StageRun producer retry recovery identity is invalid.');
+      }
+      return;
+    }
     const artifactProducer = recovery.artifact_producer_attempt_summary
       ?? recovery.producer_attempt_summary;
     const artifactProducerAttemptRef = recovery.artifact_producer_attempt_ref

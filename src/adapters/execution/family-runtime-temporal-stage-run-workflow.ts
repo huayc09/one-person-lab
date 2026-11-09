@@ -753,7 +753,29 @@ export async function StageRunWorkflow(
     let findings: StageQualityFinding[] = [];
     let currentRevisionTransport: ReturnType<typeof revisionTransportFromReceipt> = null;
     let firstRepairRound = 1;
-    if (recoveryResume) {
+    if (recoveryResume?.retry_producer === true) {
+      const producer = await runAttempt({
+        role: 'producer',
+        round: state.attempts.length,
+        artifactRefs: state.artifact_refs,
+        artifactHashes: state.artifact_hashes,
+        artifactIdentityReceiptRefs: state.artifact_identity_receipt_refs,
+      });
+      parentAttemptRef = producer.attemptRef;
+      currentArtifactProducerAttemptRef = producer.attemptRef;
+      reviewInputSnapshotMaterializationRequest =
+        producer.envelope.review_input_snapshot_materialization_request;
+      if (stageRunStopped(state)) {
+        if (!producer.executionPolicy.formalReviewRequired && state.status === 'completed_with_quality_debt') {
+          commitTerminalRouteDecision(producer);
+        }
+        return terminalize(state);
+      }
+      if (!producer.executionPolicy.formalReviewRequired) {
+        commitTerminalRouteDecision(producer);
+        return terminalize({ ...state, status: 'completed', current_role: null, updated_at: nowIso() });
+      }
+    } else if (recoveryResume) {
       parentAttemptRef = recoveryArtifactProducerAttemptRef;
       currentArtifactProducerAttemptRef = recoveryArtifactProducerAttemptRef;
       reviewInputSnapshotMaterializationRequest =

@@ -62,7 +62,12 @@ export function requireRecoveryRegistryIdentity(
 export function recoveryArtifactProducerAttemptRef(
   recovery: NonNullable<TemporalStageRunWorkflowInput['recovery_resume']>,
 ) {
-  const ref = recovery.artifact_producer_attempt_ref ?? recovery.producer_attempt_ref;
+  const retryAttempt = recovery.retry_producer === true
+    ? recovery.prior_attempt_summaries?.at(-1)
+    : null;
+  const ref = retryAttempt?.stage_attempt_id
+    ? `opl://stage_attempts/${retryAttempt.stage_attempt_id}`
+    : recovery.artifact_producer_attempt_ref ?? recovery.producer_attempt_ref;
   if (!ref) {
     throw new FrameworkContractError(
       'contract_shape_invalid',

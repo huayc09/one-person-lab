@@ -106,6 +106,11 @@ export type FamilyRuntimeCommandInput =
     retryReviewer: boolean;
   }
   | {
+    mode: 'stage_run_retry_producer';
+    stageRunId: string;
+    stageAttemptId: string;
+  }
+  | {
     mode: 'stage_artifact';
     input: {
       action: 'open' | 'commit' | 'status' | 'explain' | 'rebuild' | 'promote' | 'gc' | 'restore' | 'validate' | 'conformance' | 'workbench';
