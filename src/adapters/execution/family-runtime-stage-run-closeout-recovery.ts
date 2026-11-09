@@ -29,7 +29,6 @@ import type {
   TemporalStageRunWorkflowInput,
 } from './family-runtime-temporal.ts';
 import type {
-  TemporalStageRunAttemptSummary,
   TemporalStageRunRecoveryResume,
 } from './family-runtime-temporal-stage-run.ts';
 import {
@@ -789,18 +788,7 @@ export async function retryStageRunProducer(
       query_status: queryStatus || null,
     });
   }
-  const summary: TemporalStageRunAttemptSummary = {
-    attempt_role: 'producer',
-    quality_round_index: attempt.quality_round_index ?? 0,
-    stage_attempt_id: attempt.stage_attempt_id,
-    workflow_id: attempt.workflow_id,
-    execution_session_ref: attempt.execution_session_ref ?? null,
-    artifact_producer_attempt_ref: null,
-    status: queryStatus === 'completed' ? 'completed' : queryStatus === 'blocked' ? 'blocked' : 'failed',
-    artifact_refs: [],
-    artifact_hashes: [],
-    artifact_identity_receipt_refs: [],
-  };
+  const summary = attemptSummaryFromPersisted(attempt as unknown as Record<string, unknown>);
   const recoveryId = stableId('stage-run-producer-retry', [input.stageRunId, input.stageAttemptId]);
   const recoveryResume: TemporalStageRunRecoveryResume = {
     surface_kind: 'opl_stage_run_recovery_resume',

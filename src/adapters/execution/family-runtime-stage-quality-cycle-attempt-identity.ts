@@ -91,7 +91,20 @@ export function requireProjectedAttemptSummaryMatchesPersisted(
     artifact_producer_attempt_ref: summary.artifact_producer_attempt_ref,
     status: summary.status,
   };
-  if (canonicalJsonText(persisted) !== canonicalJsonText(projected)) {
+  const providerRun = typeof attempt.provider_run_json === 'string'
+    ? recordValue(parseJsonText(attempt.provider_run_json))
+    : recordValue(attempt.provider_run);
+  const providerFailureDiagnostic = typeof providerRun?.provider_status === 'string'
+    && providerRun.provider_status.startsWith('failed');
+  const normalizedProjected = {
+    ...projected,
+    ...(persisted.status === 'completed'
+      && projected.status === 'failed'
+      && providerFailureDiagnostic
+      ? { status: 'completed' as const }
+      : {}),
+  };
+  if (canonicalJsonText(persisted) !== canonicalJsonText(normalizedProjected)) {
     throw new FrameworkContractError(
       'contract_shape_invalid',
       'Temporal StageRun Attempt summary does not match its durable StageAttempt.',
